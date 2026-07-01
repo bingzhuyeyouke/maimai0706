@@ -185,32 +185,29 @@ class MaimaiPoster:
         # 填入正文
         self._fill_content(page, content)
 
-        # 添加话题（带刷新重试）
+        # 添加话题（搜不到自动跳过，不阻塞发帖）
         if topic:
             topic_ok = self._add_topic(page, topic)
             if not topic_ok:
-                # 刷新页面后重试（刷新可修复弹窗不渲染的问题）
-                for retry in range(3):
-                    logger.info(f"  刷新页面重试添加话题 (第{retry + 1}次)...")
-                    page.keyboard.press("Escape")
-                    time.sleep(1)
-                    page.reload(wait_until="domcontentloaded", timeout=15000)
-                    time.sleep(5)
-                    # 重新填入标题和正文
-                    if title:
-                        self._fill_title(page, title)
-                    self._fill_content(page, content)
-                    # 再试话题
-                    topic_ok = self._add_topic(page, topic)
-                    if topic_ok:
-                        break
+                # 刷新页面重试1次（解决弹窗不渲染的问题）
+                logger.info(f"  刷新页面重试添加话题 (第1次)...")
+                page.keyboard.press("Escape")
+                time.sleep(1)
+                page.reload(wait_until="domcontentloaded", timeout=15000)
+                time.sleep(5)
+                if title:
+                    self._fill_title(page, title)
+                self._fill_content(page, content)
+                topic_ok = self._add_topic(page, topic)
                 if not topic_ok:
-                    logger.error(f"  ❌ 添加话题失败: {topic}，跳过此篇")
-                    return False
+                    logger.warning(f"  ⚠️ 添加话题失败: {topic}，跳过话题继续发布")
 
         # 上传图片
         if image_paths:
             self._upload_images(page, image_paths)
+
+        # 确保发布设置开关已开启（同步主页 + 昵称水印）
+        self._enable_publish_settings(page)
 
         # 截图预览
         self._save_screenshot(page, f"maimai_before_post_{int(time.time())}")
@@ -640,6 +637,193 @@ class MaimaiPoster:
             logger.warning(f"  ⚠️ 图片上传异常: {e}")
 
         logger.success("✓ 图片上传完成")
+
+    def _enable_publish_settings(self, page: Page):
+        """确保发布设置面板中的两个开关已开启：
+        1. 发布后同步到我的主页展示（匿名/社区身份）
+        2. 使用昵称作为水印
+
+        这两个开关在页面刷新后状态会丢失，每次发帖前需检查。
+        设置面板通过工具栏中的蓝色圆形按钮展开，面板内有 h3"发布设置" 标题。
+        """
+        logger.info("检查发布设置开关...")
+
+        try:
+            # ===== 第1步：确保设置面板已展开 =====
+            # 工具栏结构（y随内容高度变化，需动态定位）：
+            #   x≈939  DIV (图片图标)
+            #   x≈983  BUTTON (表情图标)
+            #   x≈1027 BUTTON (设置按钮 - 蓝色圆形，触发"发布设置"面板)
+            #   x≈1071 DIV (另一个图标)
+            #   x≈1115 DIV "添加话题"
+            #   x≈1480 BUTTON "发动态"
+            # 设置按钮是工具栏中从左数第3个BUTTON，24x24px，无文字
+            panel_open = page.evaluate('''() => {
+                // 检查设置面板是否已经打开
+                const h3s = document.querySelectorAll('h3');
+                for (const h3 of h3s) {
+                    if ((h3.textContent || '').trim() === '发布设置'
+                        && h3.getBoundingClientRect().width > 0) {
+                        return true;
+                    }
+                }
+                return false;
+            }''')
+
+            if not panel_open:
+                # 点击设置按钮：工具栏第3个button（x≈1027, 24x24px, 无文字）
+                # 也可以通过"在'添加话题'左边最近的button"来定位
+                clicked = page.evaluate('''() => {
+                    // 策略1：找到"添加话题"文字，然后往左找最近的button
+                    const allDivs = document.querySelectorAll('div');
+                    let topicEl = null;
+                    for (const div of allDivs) {
+                        const t = (div.textContent || '').trim();
+                        const rect = div.getBoundingClientRect();
+                        const cls = (div.className || '').toString();
+                        if (t === '添加话题' && rect.width > 50 && rect.width < 150
+                            && rect.height > 15 && rect.height < 30) {
+                            topicEl = div;
+                            break;
+                        }
+                    }
+
+                    if (topicEl) {
+                        const topicRect = topicEl.getBoundingClientRect();
+                        // 找"添加话题"左边的所有button，选最近的一个
+                        const buttons = document.querySelectorAll('button');
+                        let bestBtn = null;
+                        let bestDist = Infinity;
+                        for (const btn of buttons) {
+                            const rect = btn.getBoundingClientRect();
+                            const t = (btn.textContent || '').trim();
+                            // 在同一行（y差<15），在添加话题左边，不是"发动态"
+                            if (Math.abs(rect.y - topicRect.y) < 15
+                                && rect.x < topicRect.x
+                                && t !== '发动态' && t !== '发布'
+                                && rect.width > 15 && rect.width < 40) {
+                                const dist = topicRect.x - rect.x;
+                                if (dist < bestDist) {
+                                    bestDist = dist;
+                                    bestBtn = btn;
+                                }
+                            }
+                        }
+                        if (bestBtn) {
+                            bestBtn.click();
+                            return { strategy: 'left_of_topic', x: Math.round(bestBtn.getBoundingClientRect().x) };
+                        }
+                    }
+
+                    // 策略2：如果上面没找到，找工具栏中所有24x24的无文字button
+                    // 逐个点击直到"发布设置"面板出现
+                    const buttons2 = document.querySelectorAll('button');
+                    const candidates = [];
+                    for (const btn of buttons2) {
+                        const rect = btn.getBoundingClientRect();
+                        const t = (btn.textContent || '').trim();
+                        if (rect.width >= 20 && rect.width <= 30
+                            && rect.height >= 20 && rect.height <= 30
+                            && t === '' && rect.y > 300) {
+                            candidates.push(btn);
+                        }
+                    }
+                    // 按x排序
+                    candidates.sort((a, b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x);
+                    for (const btn of candidates) {
+                        btn.click();
+                        // 检查面板是否出现
+                        const h3s = document.querySelectorAll('h3');
+                        for (const h3 of h3s) {
+                            if ((h3.textContent || '').trim() === '发布设置'
+                                && h3.getBoundingClientRect().width > 0) {
+                                return { strategy: 'try_each_button', x: Math.round(btn.getBoundingClientRect().x) };
+                            }
+                        }
+                    }
+
+                    return null;
+                }''')
+
+                if clicked:
+                    logger.info(f"  ⚙️ 点击设置按钮展开面板 (x≈{clicked.get('x')})")
+                    time.sleep(1.5)
+                else:
+                    logger.info("  ⚙️ 未找到设置按钮，尝试直接检查开关...")
+
+            # ===== 第2步：检查并启用两个开关 =====
+            #    开关是 button[role="switch"]，状态由 aria-checked 控制
+            #    每个 switch 附近有 label 包含说明文字
+            toggles_result = page.evaluate('''() => {
+                const result = { sync_home: null, nickname_watermark: null, enabled: 0 };
+
+                // 查找所有 role="switch" 的按钮
+                const switches = document.querySelectorAll('button[role="switch"]');
+                for (const sw of switches) {
+                    const ariaChecked = sw.getAttribute('aria-checked');
+                    const swRect = sw.getBoundingClientRect();
+
+                    // 找到对应的 label —— 在 switch 同一行（y接近）且在 switch 左侧
+                    const labels = document.querySelectorAll('label');
+                    for (const label of labels) {
+                        const labelText = (label.textContent || '').trim();
+                        const labelRect = label.getBoundingClientRect();
+
+                        // label 和 switch 在同一行（y差值<20），label 在 switch 左边
+                        if (Math.abs(labelRect.y - swRect.y) < 20 && labelRect.x < swRect.x) {
+                            if (labelText.includes('发布后同步到我的主页展示')) {
+                                result.sync_home = { ariaChecked };
+                                if (ariaChecked !== 'true') {
+                                    sw.click();
+                                    result.enabled++;
+                                }
+                            } else if (labelText.includes('使用昵称作为水印')) {
+                                result.nickname_watermark = { ariaChecked };
+                                if (ariaChecked !== 'true') {
+                                    sw.click();
+                                    result.enabled++;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return result;
+            }''')
+
+            # 日志输出
+            if toggles_result:
+                sync = toggles_result.get('sync_home')
+                watermark = toggles_result.get('nickname_watermark')
+
+                if sync:
+                    status = '✓ 已开启' if sync.get('ariaChecked') == 'true' else '✅ 未开启，已点击开启'
+                    logger.info(f"  {status} \"发布后同步到我的主页展示\"")
+                else:
+                    logger.info("  ⚠️ 未找到\"发布后同步到我的主页展示\"开关")
+
+                if watermark:
+                    status = '✓ 已开启' if watermark.get('ariaChecked') == 'true' else '✅ 未开启，已点击开启'
+                    logger.info(f"  {status} \"使用昵称作为水印\"")
+                else:
+                    logger.info("  ⚠️ 未找到\"使用昵称作为水印\"开关")
+
+                if toggles_result.get('enabled', 0) > 0:
+                    logger.info(f"  ✓ 发布设置检查完成，已启用 {toggles_result['enabled']} 个开关")
+                    time.sleep(0.5)
+                elif sync and watermark:
+                    logger.info("  ✓ 发布设置检查完成，开关均已开启")
+                else:
+                    logger.info("  ⚠️ 发布设置检查完成，但部分开关未找到")
+            else:
+                logger.info("  ⚠️ 未找到发布设置开关（面板可能未展开）")
+
+            # ===== 第3步：关闭设置面板（按 Escape）=====
+            page.keyboard.press("Escape")
+            time.sleep(0.5)
+
+        except Exception as e:
+            logger.warning(f"  ⚠️ 发布设置检查异常: {e}，跳过（不影响发帖）")
 
     def _click_publish(self, page: Page) -> bool:
         """点击'发动态'按钮"""

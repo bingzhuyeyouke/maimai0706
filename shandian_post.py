@@ -101,7 +101,8 @@ def parse_shandian(text: str) -> List[Dict]:
         topic_name = topic_match.group(1).strip()
 
         # 去掉"话题X："前缀（如"话题一：大众汽车"→"大众汽车"）
-        topic_name = re.sub(r'^话题[一二三四五六七八九十]+[：:]\s*', '', topic_name).strip()
+        # 也去掉单纯的"话题："前缀（如"话题：WPS回应"→"WPS回应"）
+        topic_name = re.sub(r'^话题[一二三四五六七八九十]*[：:]\s*', '', topic_name).strip()
 
         if not topic_name:
             continue
@@ -141,9 +142,6 @@ def parse_shandian(text: str) -> List[Dict]:
             # 5. 清理正文：去除所有 ** ### 【】 符号，保留分段
             title = re.sub(r'[\*\#【】\[\]]', '', title).strip()
             body = re.sub(r'[\*\#]', '', body).strip()
-
-            # 去掉可能残留的标题行（如果正文以标题开头）
-            body = re.sub(r'^' + re.escape(title) + r'\s*\n?', '', body).strip()
 
             if not body:
                 body = title  # 兜底：用标题当正文

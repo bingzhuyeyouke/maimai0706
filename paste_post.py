@@ -193,7 +193,13 @@ def resolve_images(posts: List[Dict], image_dir: str = None, image_files: List[s
     2. 正文中 [图片:xxx.jpg] 标记（每篇独立指定）
     3. posts/images/ 目录按序号自动配对（1.jpg→第1篇，2.jpg→第2篇...）
     """
-    img_dir = PROJECT_ROOT / 'posts' / 'images'
+    # 优先使用 --image-dir 参数，否则默认 posts/images/
+    if image_dir:
+        img_dir = Path(image_dir)
+        if not img_dir.is_absolute():
+            img_dir = PROJECT_ROOT / img_dir
+    else:
+        img_dir = PROJECT_ROOT / 'posts' / 'images'
 
     # 方式1：从 --images 参数（所有帖子共用）
     if image_files:
@@ -257,9 +263,39 @@ def _natural_sort_key(s: str) -> list:
 
 # ========== 主流程 ==========
 
+def merge_and_renumber(file_paths: List[str]) -> str:
+    """
+    合并多组文案文件，重新编号1-N。
+    每组文件内部是 1-9 编号，合并后按顺序重编为 1,2,3...N
+    """
+    all_text = []
+    global_idx = 0
+    for fp in file_paths:
+        path = Path(fp)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        if not path.exists():
+            logger.warning(f"⚠️ 文件不存在: {fp}")
+            continue
+        text = path.read_text(encoding='utf-8')
+        # 替换每组内的编号为全局编号
+        # 匹配 "1. 标题："、"2. 标题：" 等
+        def renumber(match):
+            nonlocal global_idx
+            global_idx += 1
+            return f"{global_idx}. 标题{match.group(1)}"
+        text = re.sub(r'\d+\.\s*标题([：:])', renumber, text)
+        all_text.append(text)
+
+    merged = '\n'.join(all_text)
+    logger.info(f"📎 合并 {len(file_paths)} 个文件，共 {global_idx} 篇帖子")
+    return merged
+
+
 def run(
     text: str = None,
     file_path: str = None,
+    file_paths: List[str] = None,
     image_dir: str = None,
     image_files: List[str] = None,
     topic: str = '我来爆个料',
@@ -272,7 +308,11 @@ def run(
     logger.info("=" * 55)
 
     # 获取文本内容
-    if file_path:
+    if file_paths:
+        # 多文件合并模式
+        text = merge_and_renumber(file_paths)
+        file_path = file_paths[0]  # 用于清理时定位
+    elif file_path:
         text = Path(file_path).read_text(encoding='utf-8')
         logger.info(f"📄 从文件读取: {file_path}")
     elif text is None:
@@ -340,10 +380,29 @@ def run(
 
     poster.disconnect()
 
-    # 发帖成功后自动清理图片目录
+    # 发帖全部成功后自动清理图片和文案（失败则保留，方便补发）
     if result['failed'] == 0:
         _cleanup_images()
         _cleanup_batch_images(file_path)
+        # 清理主文案文件
+        if file_path:
+            content_path = Path(file_path)
+            if not content_path.is_absolute():
+                content_path = PROJECT_ROOT / content_path
+            if content_path.exists():
+                content_path.unlink()
+                logger.info(f"🧹 已清理文案文件: {content_path.name}")
+        # 清理多文件模式下的所有文案文件
+        if file_paths:
+            for fp in file_paths:
+                p = Path(fp)
+                if not p.is_absolute():
+                    p = PROJECT_ROOT / p
+                if p.exists():
+                    p.unlink()
+                    logger.info(f"🧹 已清理文案文件: {p.name}")
+    else:
+        logger.warning(f"⚠️ 有 {result['failed']} 篇失败，保留图片和文案以便补发")
 
     logger.info("=" * 55)
     logger.info(f"🏁 完成: 成功 {result['success']}, 失败 {result['failed']}")
@@ -366,7 +425,7 @@ def _cleanup_images():
 
 
 def _cleanup_batch_images(file_path: str):
-    """发帖成功后自动清理对应 batch 文件夹中的图片和文案，方便下次存放"""
+    """发帖成功后自动清理对应 batch 文件夹中的图片和文案"""
     if not file_path:
         return
     # 从文件路径推断 batch 目录（如 posts/batch3/content.txt → posts/batch3/）
@@ -398,6 +457,7 @@ if __name__ == "__main__":
     cli = argparse.ArgumentParser(description="粘贴发帖 — 复制粘贴内容，批量发到脉脉")
     cli.add_argument("--posts", type=str, help="直接传入帖子内容")
     cli.add_argument("--file", type=str, help="从文件读取帖子内容")
+    cli.add_argument("--files", nargs='+', help="多文件合并发帖（自动重新编号1-N）")
     cli.add_argument("--images", nargs='*', help="图片文件路径（所有帖子共用）")
     cli.add_argument("--image-dir", type=str, help="图片目录（自动分配给各帖子）")
     cli.add_argument("--topic", type=str, default="我来爆个料", help="话题（默认：我来爆个料）")
@@ -406,9 +466,18 @@ if __name__ == "__main__":
 
     args = cli.parse_args()
 
-    if not args.posts and not args.file:
+    if not args.posts and not args.file and not args.files:
         # 交互模式
         success = run(dry_run=args.dry_run, limit=args.limit, topic=args.topic)
+    elif args.files:
+        success = run(
+            file_paths=args.files,
+            image_dir=args.image_dir,
+            image_files=args.images,
+            dry_run=args.dry_run,
+            limit=args.limit,
+            topic=args.topic,
+        )
     elif args.file:
         success = run(
             file_path=args.file,
