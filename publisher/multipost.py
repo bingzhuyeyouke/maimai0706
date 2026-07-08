@@ -222,25 +222,60 @@ class MultiPostPublisher(MaimaiPageOps):
             logger.info(f"📝 第 {i}/{total} 篇")
             logger.info(f"{'=' * 40}")
 
-            try:
-                result = self.publish(
-                    title=post_data.get("title", ""),
-                    body=post_data.get("body", ""),
-                    platforms=platforms,
-                    image_paths=post_data.get("image_paths"),
-                    maimai_topic=post_data.get("topic"),
-                    dry_run=dry_run,
-                )
-                if result:
-                    success += 1
-                    results.append({"index": i, "status": "success"})
-                else:
+            # 锁屏恢复重试：如果 Chrome 不响应，等待恢复后重试当前篇
+            max_retries = 3
+            for retry in range(max_retries):
+                try:
+                    result = self.publish(
+                        title=post_data.get("title", ""),
+                        body=post_data.get("body", ""),
+                        platforms=platforms,
+                        image_paths=post_data.get("image_paths"),
+                        maimai_topic=post_data.get("topic"),
+                        dry_run=dry_run,
+                    )
+                    if result:
+                        success += 1
+                        results.append({"index": i, "status": "success"})
+                    else:
+                        failed += 1
+                        results.append({"index": i, "status": "failed"})
+                    break  # 成功或普通失败，跳出重试循环
+
+                except RuntimeError as e:
+                    if "Chrome 长时间未响应" in str(e) and retry < max_retries - 1:
+                        # 锁屏导致的失败，等更久后重试
+                        wait_time = 60 * (retry + 1)  # 60s, 120s
+                        logger.warning(f"  ⏳ Chrome 未响应，等待 {wait_time} 秒后重试（第{retry+1}次）...")
+                        time.sleep(wait_time)
+                        # 重连 Chrome
+                        try:
+                            if self._playwright:
+                                try:
+                                    self._playwright.stop()
+                                except Exception:
+                                    pass
+                            self._playwright = sync_playwright().start()
+                            self._browser = self._playwright.chromium.connect_over_cdp(CDP_URL)
+                            self._context = self._browser.contexts[0] if self._browser.contexts else None
+                            if self._context:
+                                logger.success("  ✓ Chrome 已重连")
+                                continue
+                        except Exception:
+                            pass
+                        continue
+                    else:
+                        # 非锁屏错误或重试耗尽
+                        logger.error(f"❌ 第 {i} 篇发布失败: {e}")
+                        failed += 1
+                        results.append({"index": i, "status": "failed", "error": str(e)})
+                        break
+
+                except Exception as e:
+                    logger.error(f"❌ 第 {i} 篇发布失败: {e}")
                     failed += 1
-                    results.append({"index": i, "status": "failed"})
-            except Exception as e:
-                logger.error(f"❌ 第 {i} 篇发布失败: {e}")
-                failed += 1
-                results.append({"index": i, "status": "failed", "error": str(e)})
+                    results.append({"index": i, "status": "failed", "error": str(e)})
+                    break
 
             # 不是最后一篇时等待（随机抖动防检测，与脉脉一致）
             if i < total and not dry_run:
@@ -264,8 +299,64 @@ class MultiPostPublisher(MaimaiPageOps):
 
         return {"success": success, "failed": failed, "results": results}
 
+    def _ensure_chrome_responsive(self, timeout: int = 120) -> bool:
+        """确保 Chrome 可响应（处理锁屏/休眠场景）
+
+        锁屏后 Chrome 页面会被挂起，Playwright 操作超时。
+        此方法检测 Chrome 是否响应，不响应则等待恢复（用户解锁屏幕），
+        然后重连 Playwright。
+
+        参数:
+            timeout: 最长等待秒数（默认120秒=2分钟）
+
+        返回:
+            True Chrome 已恢复，False 超时未恢复
+        """
+        # 先快速检查当前连接是否可用
+        try:
+            pages = self._context.pages if self._context else []
+            if pages:
+                pages[0].evaluate('1+1', timeout=5000)
+                return True
+        except Exception:
+            pass
+
+        # Chrome 不响应，等待恢复
+        logger.info("⏳ Chrome 未响应（可能屏幕已锁定），等待恢复...")
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                # 断开旧连接，重连
+                if self._playwright:
+                    try:
+                        self._playwright.stop()
+                    except Exception:
+                        pass
+                time.sleep(2)
+
+                self._playwright = sync_playwright().start()
+                self._browser = self._playwright.chromium.connect_over_cdp(CDP_URL)
+                self._context = self._browser.contexts[0] if self._browser.contexts else None
+
+                if self._context:
+                    pages = self._context.pages
+                    if pages:
+                        pages[0].evaluate('1+1', timeout=5000)
+                        elapsed = int(time.time() - start)
+                        logger.success(f"✓ Chrome 已恢复响应（等待 {elapsed} 秒）")
+                        return True
+            except Exception:
+                pass
+            time.sleep(5)
+
+        logger.error(f"❌ Chrome {timeout} 秒内未恢复响应")
+        return False
+
     def _open_editor(self) -> Page:
-        """第1步：打开或切换到 MultiPost 编辑器（确保在编辑状态，不是平台选择页）"""
+        """第1步：打开或切换到 MultiPost 编辑器（确保在编辑状态，不是平台选择页）
+
+        支持锁屏恢复：如果页面加载超时，会自动等待 Chrome 恢复响应后重试。
+        """
         logger.info("打开 MultiPost 编辑器...")
 
         # 先看看是否已经打开了 multipost 页面
@@ -278,13 +369,30 @@ class MultiPostPublisher(MaimaiPageOps):
         if found_page:
             # 已有页面，刷新回到编辑器初始状态
             logger.info("  刷新页面回到编辑器...")
-            found_page.goto(MULTIPOST_URL, wait_until="domcontentloaded", timeout=15000)
+            try:
+                found_page.goto(MULTIPOST_URL, wait_until="domcontentloaded", timeout=15000)
+            except Exception:
+                logger.warning("  ⚠️ 页面刷新超时，可能屏幕已锁定，等待恢复...")
+                if not self._ensure_chrome_responsive():
+                    raise RuntimeError("Chrome 长时间未响应，请解锁屏幕后重试")
+                # 恢复后重新查找 multipost 页面（重连后 pages 引用可能失效）
+                for pg in self._context.pages:
+                    if "multipost.app" in pg.url and "signin" not in pg.url:
+                        found_page = pg
+                        break
+                found_page.goto(MULTIPOST_URL, wait_until="domcontentloaded", timeout=15000)
             time.sleep(3)
             self._page = found_page
         else:
             # 没有就新建
             page = self._context.new_page()
-            page.goto(MULTIPOST_URL, wait_until="domcontentloaded", timeout=15000)
+            try:
+                page.goto(MULTIPOST_URL, wait_until="domcontentloaded", timeout=15000)
+            except Exception:
+                logger.warning("  ⚠️ 新页面加载超时，等待恢复...")
+                if not self._ensure_chrome_responsive():
+                    raise RuntimeError("Chrome 长时间未响应，请解锁屏幕后重试")
+                page.goto(MULTIPOST_URL, wait_until="domcontentloaded", timeout=15000)
             time.sleep(3)
             self._page = page
             found_page = page
@@ -297,7 +405,13 @@ class MultiPostPublisher(MaimaiPageOps):
         textarea = found_page.locator('textarea[placeholder*="内容"]')
         if textarea.count() == 0:
             logger.warning("  编辑器未就绪，再次刷新...")
-            found_page.reload(wait_until="domcontentloaded", timeout=10000)
+            try:
+                found_page.reload(wait_until="domcontentloaded", timeout=10000)
+            except Exception:
+                logger.warning("  ⚠️ 再次刷新超时，等待恢复...")
+                if not self._ensure_chrome_responsive():
+                    raise RuntimeError("Chrome 长时间未响应")
+                found_page.reload(wait_until="domcontentloaded", timeout=10000)
             time.sleep(3)
 
         logger.success("✓ 编辑器已打开")

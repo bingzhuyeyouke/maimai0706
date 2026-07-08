@@ -53,23 +53,29 @@ class MaimaiPageOps:
     """
 
     def _maimai_switch_identity(self, page: Page):
-        """确保身份为'职场领域创作者'（幂等；只点元素不刷页）"""
+        """确保身份为'职场领域创作者'（幂等；只点元素不刷页）
+
+        使用视口相对定位，兼容不同屏幕尺寸。
+        """
         logger.info("检查发帖身份...")
 
+        # 获取视口高度用于相对定位
+        viewport = page.evaluate('() => window.innerHeight || 800')
+
         # 检查当前身份文本是否包含"职场领域创作者"
-        current = page.evaluate('''() => {
+        current = page.evaluate('''(vh) => {
             const all = document.querySelectorAll('span, div');
             for (const el of all) {
                 const t = (el.textContent || '').trim();
                 const rect = el.getBoundingClientRect();
                 if (t.includes('职场领域创作者') && t.length < 30
                     && rect.width > 50 && rect.width < 300
-                    && rect.y > 80 && rect.y < 200) {
+                    && rect.y > vh * 0.05 && rect.y < vh * 0.3) {
                     return t.substring(0, 30);
                 }
             }
             return '';
-        }''')
+        }''', viewport)
 
         if '职场领域创作者' in current:
             logger.info("  ✓ 身份已是职场领域创作者")
@@ -77,19 +83,19 @@ class MaimaiPageOps:
 
         logger.info("  切换身份为职场领域创作者...")
 
-        clicked_switch = page.evaluate('''() => {
+        clicked_switch = page.evaluate('''(vh) => {
             const all = document.querySelectorAll('span, a, div');
             for (const el of all) {
                 const t = (el.textContent || '').trim();
                 const rect = el.getBoundingClientRect();
-                if (t === '切换' && rect.y > 80 && rect.y < 200
+                if (t === '切换' && rect.y > vh * 0.05 && rect.y < vh * 0.3
                     && rect.width > 10 && rect.width < 80) {
                     el.click();
                     return true;
                 }
             }
             return false;
-        }''')
+        }''', viewport)
 
         if not clicked_switch:
             logger.warning("  ⚠️ 未找到切换按钮")
@@ -170,12 +176,15 @@ class MaimaiPageOps:
             page.keyboard.press("Backspace")
             time.sleep(0.3)
 
-        page.evaluate('''() => {
+        # 关闭弹出面板：使用视口相对定位，兼容不同屏幕尺寸
+        vh = page.evaluate('() => window.innerHeight || 600')
+        page.evaluate('''(vh) => {
             const closeButtons = document.querySelectorAll('svg, button, div');
             for (const btn of closeButtons) {
                 const rect = btn.getBoundingClientRect();
+                // 关闭按钮：小尺寸（<25px），Y在视口20%~50%范围内
                 if (rect.width > 0 && rect.width < 25 && rect.height > 0 && rect.height < 25
-                    && rect.y > 250 && rect.y < 320) {
+                    && rect.y > vh * 0.2 && rect.y < vh * 0.5) {
                     const svg = btn.querySelector('svg');
                     if (svg && (btn.getAttribute('aria-label')?.includes('关闭')
                         || btn.getAttribute('aria-label')?.includes('close')
@@ -184,7 +193,7 @@ class MaimaiPageOps:
                     }
                 }
             }
-        }''')
+        }''', vh)
 
         time.sleep(0.3)
 
@@ -227,11 +236,20 @@ class MaimaiPageOps:
           3. 在搜索框输入话题名称
           4. 点击搜索结果
         搜不到返回 False 让调用方刷新页面重试。
+
+        ⚠️ 使用视口相对定位，不依赖硬编码 Y 坐标，兼容不同屏幕尺寸。
         """
         logger.info(f"添加话题: {topic}")
 
+        # 获取视口高度，用于相对定位
+        viewport = page.evaluate('() => ({ innerHeight: window.innerHeight, innerWidth: window.innerWidth })')
+        vh = viewport.get('innerHeight', 800)
+        vw = viewport.get('innerWidth', 1280)
+        logger.debug(f"  视口: {vw}x{vh}")
+
         # 1. 点击「添加话题」按钮
-        clicked = page.evaluate('''() => {
+        # 使用视口相对定位：按钮在编辑器下方，通常在页面下半部分
+        clicked = page.evaluate('''(vh) => {
             const all = document.querySelectorAll('div, span, label');
             let best = null;
             let bestArea = Infinity;
@@ -242,7 +260,8 @@ class MaimaiPageOps:
                 const cls = (el.className || '').toString();
                 const area = rect.width * rect.height;
 
-                if (t.includes('添加话题') && rect.y > 250 && rect.width > 0
+                // 按钮在页面下半部分（超过40%视口高度），且有cursor-pointer样式
+                if (t.includes('添加话题') && rect.y > vh * 0.3 && rect.width > 0
                     && cls.includes('cursor-pointer')) {
                     if (area < bestArea) {
                         bestArea = area;
@@ -256,17 +275,18 @@ class MaimaiPageOps:
                 return best.textContent.trim();
             }
 
+            // 兜底：不限制Y坐标，只要求文本精确匹配且元素够小
             for (const el of all) {
                 const t = (el.textContent || '').trim();
                 const rect = el.getBoundingClientRect();
-                if ((t === '添加话题' || t === '# 添加话题') && rect.y > 250 && rect.width < 150) {
+                if ((t === '添加话题' || t === '# 添加话题') && rect.width < 150 && rect.width > 0) {
                     el.click();
                     return t;
                 }
             }
 
             return false;
-        }''')
+        }''', vh)
 
         if not clicked:
             logger.warning("  ⚠️ 未找到'添加话题'按钮")
@@ -276,12 +296,14 @@ class MaimaiPageOps:
         time.sleep(3)
 
         # 2. 在弹出面板的搜索框中输入话题名称（等待最多10秒）
+        # 弹出面板通常在页面中间区域，使用视口相对定位
         popup_search = None
         for _ in range(10):
             for inp in page.locator('input[type="search"]').all():
                 try:
                     box = inp.bounding_box()
-                    if box and box['y'] > 100 and box['width'] > 50:
+                    # 搜索框在弹出面板中，Y坐标在视口20%~80%范围内
+                    if box and box['y'] > vh * 0.1 and box['width'] > 50:
                         popup_search = inp
                         break
                 except Exception:
@@ -290,7 +312,8 @@ class MaimaiPageOps:
                 for inp in page.locator('input[type="text"]').all():
                     try:
                         box = inp.bounding_box()
-                        if box and box['y'] > 250 and box['width'] > 50:
+                        # 文本输入框也用相对定位
+                        if box and box['y'] > vh * 0.2 and box['width'] > 50:
                             popup_search = inp
                             break
                     except Exception:
@@ -310,7 +333,10 @@ class MaimaiPageOps:
         time.sleep(2)
 
         # 3. 点击搜索结果（精确匹配优先 → 前缀匹配 → 兜底点第一个结果）
-        selected = page.evaluate('''(topic) => {
+        # 搜索结果在弹出面板中，使用视口相对定位
+        selected = page.evaluate('''(args) => {
+            const topic = args.topic;
+            const vh = args.vh;
             const all = document.querySelectorAll('div');
             let exactRow = null;
             let exactLen = Infinity;
@@ -323,7 +349,8 @@ class MaimaiPageOps:
                 const rect = el.getBoundingClientRect();
                 const cls = (el.className || '').toString();
 
-                if (!cls.includes('cursor-pointer') || rect.y < 300 || rect.height < 30 || rect.height > 60) continue;
+                // 搜索结果在弹出面板中：Y在视口10%~90%范围，高度合理
+                if (!cls.includes('cursor-pointer') || rect.y < vh * 0.1 || rect.height < 20 || rect.height > 80) continue;
 
                 // 记录第一个结果（兜底用）
                 if (!firstRow) firstRow = el;
@@ -347,7 +374,7 @@ class MaimaiPageOps:
                 return { match: matchType, text: target.textContent.trim().substring(0, 30) };
             }
             return null;
-        }''', topic)
+        }''', {"topic": topic, "vh": vh})
 
         if selected:
             match_type = selected.get('match', 'unknown')
@@ -391,6 +418,12 @@ class MaimaiPageOps:
         2. 使用昵称作为水印
 
         开关在页面刷新后状态会丢失，每次发帖前需检查。
+
+        修复：
+        - Y容差从20px扩大到40px，兼容不同屏幕尺寸和布局
+        - label匹配从只找<label>扩展到<label>/<span>/<div>
+        - 用"最近距离匹配"而非"第一个Y匹配"，避免误绑定
+        - 增加面板展开后的等待时间
         """
         logger.info("检查发布设置开关...")
 
@@ -408,7 +441,8 @@ class MaimaiPageOps:
             }''')
 
             if not panel_open:
-                clicked = page.evaluate('''() => {
+                vh = page.evaluate('() => window.innerHeight || 600')
+                clicked = page.evaluate('''(vh) => {
                     // 策略1：找到"添加话题"文字，然后往左找最近的button
                     const allDivs = document.querySelectorAll('div');
                     let topicEl = null;
@@ -430,6 +464,7 @@ class MaimaiPageOps:
                         for (const btn of buttons) {
                             const rect = btn.getBoundingClientRect();
                             const t = (btn.textContent || '').trim();
+                            // 用相对距离而非绝对Y坐标：与"添加话题"按钮同一行
                             if (Math.abs(rect.y - topicRect.y) < 15
                                 && rect.x < topicRect.x
                                 && t !== '发动态' && t !== '发布'
@@ -448,14 +483,27 @@ class MaimaiPageOps:
                     }
 
                     // 策略2：工具栏中所有24x24的无文字button，逐个点击直到面板出现
+                    // 使用"添加话题"按钮的Y坐标作为参考，而非硬编码值
+                    const topicDivs = document.querySelectorAll('div');
+                    let topicY = 0;
+                    for (const div of topicDivs) {
+                        const t = (div.textContent || '').trim();
+                        const rect = div.getBoundingClientRect();
+                        if (t === '添加话题' && rect.width > 50 && rect.width < 150) {
+                            topicY = rect.y;
+                            break;
+                        }
+                    }
+                    const refY = topicY || vh * 0.4;  // 兜底：视口40%位置
                     const buttons2 = document.querySelectorAll('button');
                     const candidates = [];
                     for (const btn of buttons2) {
                         const rect = btn.getBoundingClientRect();
                         const t = (btn.textContent || '').trim();
+                        // 按钮在添加话题同一行或更下方，用视口相对定位
                         if (rect.width >= 20 && rect.width <= 30
                             && rect.height >= 20 && rect.height <= 30
-                            && t === '' && rect.y > 300) {
+                            && t === '' && rect.y > Math.max(refY - vh * 0.08, vh * 0.1)) {
                             candidates.push(btn);
                         }
                     }
@@ -472,72 +520,140 @@ class MaimaiPageOps:
                     }
 
                     return null;
-                }''')
+                }''', vh)
 
                 if clicked:
                     logger.info(f"  ⚙️ 点击设置按钮展开面板 (x≈{clicked.get('x')})")
-                    time.sleep(1.5)
+                    time.sleep(2.5)  # 增加等待：面板动画需要时间
                 else:
                     logger.info("  ⚙️ 未找到设置按钮，尝试直接检查开关...")
 
             # 第2步：检查并启用两个开关
-            toggles_result = page.evaluate('''() => {
-                const result = { sync_home: null, nickname_watermark: null, enabled: 0 };
-
+            # ⚠️ 关键改进：不在 evaluate 里 click（React 开关不响应 JS click）
+            # 改为：evaluate 只找位置和状态 → Playwright 真实点击 → 二次验证
+            switches_info = page.evaluate('''() => {
+                const result = [];
                 const switches = document.querySelectorAll('button[role="switch"]');
+
                 for (const sw of switches) {
                     const ariaChecked = sw.getAttribute('aria-checked');
                     const swRect = sw.getBoundingClientRect();
 
-                    const labels = document.querySelectorAll('label');
-                    for (const label of labels) {
-                        const labelText = (label.textContent || '').trim();
-                        const labelRect = label.getBoundingClientRect();
+                    // 扩展搜索：label / span / div 都可能是文字容器
+                    let bestLabel = null;
+                    let bestDist = Infinity;
+                    let bestText = '';
 
-                        if (Math.abs(labelRect.y - swRect.y) < 20 && labelRect.x < swRect.x) {
-                            if (labelText.includes('发布后同步到我的主页展示')) {
-                                result.sync_home = { ariaChecked };
-                                if (ariaChecked !== 'true') {
-                                    sw.click();
-                                    result.enabled++;
-                                }
-                            } else if (labelText.includes('使用昵称作为水印')) {
-                                result.nickname_watermark = { ariaChecked };
-                                if (ariaChecked !== 'true') {
-                                    sw.click();
-                                    result.enabled++;
-                                }
-                            }
+                    const containers = document.querySelectorAll('label, span, div, p');
+                    for (const el of containers) {
+                        const text = (el.textContent || '').trim();
+                        const rect = el.getBoundingClientRect();
+
+                        if (!text.includes('发布后同步') && !text.includes('使用昵称')) continue;
+                        if (Math.abs(rect.y - swRect.y) > 40) continue;
+                        if (rect.x > swRect.x + 10) continue;
+
+                        const dist = Math.abs(rect.y - swRect.y) + Math.abs(rect.x + rect.width - swRect.x);
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            bestLabel = el;
+                            bestText = text;
+                        }
+                    }
+
+                    if (bestLabel) {
+                        let key = '';
+                        if (bestText.includes('发布后同步')) {
+                            key = 'sync_home';
+                        } else if (bestText.includes('使用昵称')) {
+                            key = 'nickname_watermark';
+                        }
+                        if (key) {
+                            result.push({
+                                key: key,
+                                ariaChecked: ariaChecked,
+                                x: swRect.x + swRect.width / 2,
+                                y: swRect.y + swRect.height / 2,
+                                label: bestText.substring(0, 20),
+                            });
                         }
                     }
                 }
-
                 return result;
             }''')
 
-            if toggles_result:
-                sync = toggles_result.get('sync_home')
-                watermark = toggles_result.get('nickname_watermark')
+            enabled_count = 0
+            for sw_info in (switches_info or []):
+                key = sw_info.get('key', '')
+                aria = sw_info.get('ariaChecked')
+                cx = sw_info.get('x', 0)
+                cy = sw_info.get('y', 0)
+                label = sw_info.get('label', '')
 
-                if sync:
-                    status = '✓ 已开启' if sync.get('ariaChecked') == 'true' else '✅ 未开启，已点击开启'
-                    logger.info(f"  {status} \"发布后同步到我的主页展示\"")
+                if aria == 'true':
+                    # 已开启，跳过
+                    if key == 'sync_home':
+                        logger.info(f"  ✓ 已开启 \"发布后同步到我的主页展示\"")
+                    elif key == 'nickname_watermark':
+                        logger.info(f"  ✓ 已开启 \"使用昵称作为水印\"")
+                    continue
+
+                # 未开启 → 用 Playwright 真实点击（模拟鼠标事件，React 能响应）
+                if cx > 0 and cy > 0:
+                    # 先尝试用 locator 精确点击
+                    clicked_ok = False
+                    try:
+                        # 找到包含目标文字的最近的 switch
+                        for attempt in range(3):
+                            page.mouse.click(cx, cy)
+                            time.sleep(0.8)
+
+                            # 二次验证：检查 aria-checked 是否变成 true
+                            new_aria = page.evaluate('''(args) => {
+                                const switches = document.querySelectorAll('button[role="switch"]');
+                                for (const sw of switches) {
+                                    const r = sw.getBoundingClientRect();
+                                    if (Math.abs(r.x + r.width/2 - args.cx) < 5
+                                        && Math.abs(r.y + r.height/2 - args.cy) < 5) {
+                                        return sw.getAttribute('aria-checked');
+                                    }
+                                }
+                                return null;
+                            }''', {"cx": cx, "cy": cy})
+
+                            if new_aria == 'true':
+                                clicked_ok = True
+                                break
+                            logger.warning(f"    第{attempt+1}次点击未生效，重试...")
+                    except Exception as e:
+                        logger.warning(f"    Playwright 点击异常: {e}")
+
+                    if clicked_ok:
+                        enabled_count += 1
+                        if key == 'sync_home':
+                            logger.info(f"  ✅ 已点击开启 \"发布后同步到我的主页展示\"（验证通过）")
+                        elif key == 'nickname_watermark':
+                            logger.info(f"  ✅ 已点击开启 \"使用昵称作为水印\"（验证通过）")
+                    else:
+                        if key == 'sync_home':
+                            logger.warning(f"  ❌ \"发布后同步到我的主页展示\" 点击3次仍未生效！")
+                        elif key == 'nickname_watermark':
+                            logger.warning(f"  ❌ \"使用昵称作为水印\" 点击3次仍未生效！")
                 else:
-                    logger.info("  ⚠️ 未找到\"发布后同步到我的主页展示\"开关")
+                    if key == 'sync_home':
+                        logger.info("  ⚠️ 未找到\"发布后同步到我的主页展示\"开关")
+                    elif key == 'nickname_watermark':
+                        logger.info("  ⚠️ 未找到\"使用昵称作为水印\"开关")
 
-                if watermark:
-                    status = '✓ 已开启' if watermark.get('ariaChecked') == 'true' else '✅ 未开启，已点击开启'
-                    logger.info(f"  {status} \"使用昵称作为水印\"")
-                else:
-                    logger.info("  ⚠️ 未找到\"使用昵称作为水印\"开关")
-
-                if toggles_result.get('enabled', 0) > 0:
-                    logger.info(f"  ✓ 发布设置检查完成，已启用 {toggles_result['enabled']} 个开关")
-                    time.sleep(0.5)
-                elif sync and watermark:
+            if enabled_count > 0:
+                logger.info(f"  ✓ 发布设置检查完成，已启用 {enabled_count} 个开关")
+                time.sleep(0.5)
+            elif switches_info:
+                all_on = all(s.get('ariaChecked') == 'true' for s in switches_info)
+                if all_on:
                     logger.info("  ✓ 发布设置检查完成，开关均已开启")
                 else:
-                    logger.info("  ⚠️ 发布设置检查完成，但部分开关未找到")
+                    logger.info("  ⚠️ 发布设置检查完成，但部分开关点击未生效")
             else:
                 logger.info("  ⚠️ 未找到发布设置开关（面板可能未展开）")
 
@@ -555,7 +671,8 @@ class MaimaiPageOps:
         page.keyboard.press("Escape")
         time.sleep(1)
 
-        clicked = page.evaluate('''() => {
+        vh = page.evaluate('() => window.innerHeight || 600')
+        clicked = page.evaluate('''(vh) => {
             const buttons = document.querySelectorAll('button');
             for (const btn of buttons) {
                 const t = (btn.textContent || '').trim();
@@ -569,13 +686,14 @@ class MaimaiPageOps:
             for (const el of all) {
                 const t = (el.textContent || '').trim();
                 const rect = el.getBoundingClientRect();
-                if ((t === '发动态' || t === '发布') && rect.width > 50 && rect.y > 200) {
+                // "发动态"按钮在页面下半区域，用视口相对定位
+                if ((t === '发动态' || t === '发布') && rect.width > 50 && rect.y > vh * 0.25) {
                     el.click();
                     return { tag: el.tagName, text: t };
                 }
             }
             return null;
-        }''')
+        }''', vh)
 
         if not clicked:
             logger.warning("  ⚠️ 未找到'发动态'按钮")

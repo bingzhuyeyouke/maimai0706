@@ -156,9 +156,19 @@ def start_chrome():
         chrome_path,
         f"--remote-debugging-port={DEBUG_PORT}",
         f"--user-data-dir={CHROME_USER_DATA}",
+        # ⚠️ 反休眠参数（锁屏后 Chrome 不挂起，Playwright 可继续操作）
+        "--disable-backgrounding-occluded-windows",   # 窗口被遮挡时不降低优先级
+        "--disable-renderer-backgrounding",           # 渲染进程不被后台挂起
+        "--disable-background-networking",             # 后台网络不被节流
+        "--disable-popup-blocking",                   # 不拦截弹窗（MultiPost需要）
+        "--disable-features=CalculateNativeWinOcclusion",  # 禁用窗口遮挡检测
     ]
 
     # 在后台启动
+    # macOS: 用 caffeinate 包裹，防止系统休眠导致 Chrome 挂起
+    if not IS_WINDOWS:
+        cmd = ["caffeinate", "-i"] + cmd
+
     process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # 等待启动
@@ -214,7 +224,12 @@ def _check_wechatsync_extension():
             logger.info("  如需多平台发布，请安装 Wechatsync 扩展：")
             logger.info("    1. Chrome 打开 chrome://extensions/")
             logger.info("    2. 启用开发者模式")
-            logger.info("    3. 加载已解压的扩展: /Users/bytedance/claude/Wechatsync/packages/extension/dist")
+            # 跨平台扩展路径提示
+            if IS_WINDOWS:
+                ext_path = str(Path(os.environ.get("USERPROFILE", "~")) / "claude" / "Wechatsync" / "packages" / "extension" / "dist")
+            else:
+                ext_path = str(Path.home() / "claude" / "Wechatsync" / "packages" / "extension" / "dist")
+            logger.info(f"    3. 加载已解压的扩展: {ext_path}")
             logger.info("    4. 扩展设置中启用 MCP 连接，Token: maimai-sync-2024")
 
     except Exception as e:
