@@ -2,13 +2,62 @@
 
 本文件是 Claude Code 的项目级指令，克隆项目后自动生效。
 
+## 前置条件
+
+1. **Chrome 必须以调试端口启动**：`python3 start_chrome.py`（Mac/Windows 双平台）
+2. **环境配置**：复制 `.env.example` 为 `.env`，填入 `PEXELS_API_KEY`
+3. **依赖安装**：`pip install -r requirements.txt`
+4. **首次运行务必 `--dry-run`** 测试流程
+
 ## 发帖模式快捷指令
 
 | 指令 | 模式 | 脚本 | 平台 |
 |------|------|------|------|
-| `mutipost` + 文案 | MultiPost三平台发布 | `multi_publish_0707.py` | 脉脉+公众号+头条 |
+| `mutipost` + 文案 | MultiPost三平台发布 | `multi_publish_0715.py` | 脉脉+公众号+头条 |
 | `爆料` / `爆个料` | 爆料活动 | `paste_post.py` | 脉脉 |
 | `闪电观察` / `话题` | 闪电观察者 | `shandian_post.py` | 脉脉 |
+
+## ⚠️ 发帖决策树（收到发帖任务必读）
+
+| 特征 | 爆料活动 | 闪电观察活动 | MultiPost三平台 |
+|------|---------|-------------|---------------|
+| 关键词 | "爆料"、"爆个料" | "闪电观察"、"话题" | "mutipost"、"MultiPost" |
+| 内容格式 | 编号+标题+正文 | ##话题名+**第X篇｜标题** | 话题N+粗体导语+正文 |
+| 有图 | ✅ 用户说"图片已存好" | ✅ Pexels自动搜图 | ✅ Pexels自动搜图 |
+| 话题 | 固定"我来爆个料" | 每篇不同，需搜索匹配 | 每话题不同，需搜索匹配 |
+| 平台 | 脉脉 | 脉脉 | 脉脉+公众号+头条 |
+
+### 绝对不要做的事
+1. ❌ 不要用 paste_post.py 发闪电观察内容
+2. ❌ 不要用 shandian_post.py 发爆料内容
+3. ❌ 不要忘记 cd 到项目目录
+4. ❌ 不要自己改代码绕弯路，先看已有脚本是否已支持
+
+## 爆料活动规则
+
+- **话题固定**："我来爆个料"
+- **有标题**：用户给的编号标题就是标题
+- **有图**：图片放到 `posts/images/`（1.png→第1篇，2.png→第2篇...）
+- **命令**：`python3 paste_post.py --file posts/xxx.txt`
+- **输入格式**：
+```
+1. 标题：xxx
+正文：第一段
+
+第二段
+
+2. 标题：xxx
+正文：...
+```
+- 帖子之间只留空行，不要加 `---` 分隔符
+
+## 闪电观察者规则
+
+- **无标题**：标题就是话题名
+- **动态话题**：每篇不同，需要搜索匹配
+- **可选图**：默认不带图，加 `--no-image`；带图时去掉
+- **命令**：`python3 shandian_post.py --file posts/shandian.txt --no-image`
+- **每话题2篇**，用 `## 话题名称` 分隔
 
 ## MultiPost 三平台发布规则（mutipost 指令必读）
 
@@ -48,9 +97,25 @@
 ### Pexels 搜图
 - 中文话题需翻译为英文关键词再搜图
 - 例：字节豆包股 → ByteDance Doubao stock，微信支付AI专属卡 → WeChat Pay AI card
+- 翻译原则：保留品牌英文原名，通用词用英文直译，尽量简短精准
 
 ### 发帖间隔
 - `multipost_post_interval = 90`（90秒，±30秒抖动）
+- `maimai_post_interval = 150`（2.5分钟，±30秒抖动）
+
+### MultiPost 发布流程
+1. 用户给 Claude 热点话题和文案
+2. Claude 解析文章（标题=话题名，正文=粗体导语+后续段落）
+3. Pexels API 搜配图（中文话题翻译为英文关键词，每话题1张）
+4. 脉脉 + 公众号 + 头条全走 MultiPost（一次会话可同时勾选多平台）
+5. 发布完成后自动清理平台标签页 + 删除本地下载的图片
+
+## 跨平台兼容规则
+- ⚠️ **所有代码必须兼容 Windows + Mac 双平台**
+- 使用 `platform.system()` 检测操作系统
+- 路径使用 `pathlib.Path`，不硬编码斜杠
+- Chrome 启动参数适配不同平台（`start_chrome.py` 已处理）
+- 考虑不同屏幕尺寸的兼容性
 
 ## 关键文件
 
@@ -58,7 +123,16 @@
 |------|------|
 | `publisher/multipost.py` | MultiPostPublisher 核心，统管所有平台 |
 | `publisher/maimai.py` | MaimaiPageOps mixin（脉脉DOM操作） |
-| `multi_publish_0707.py` | MultiPost 批量发布脚本 |
+| `paste_post.py` | 爆料活动入口（固定话题，有标题，手动配图） |
+| `shandian_post.py` | 闪电观察者入口（动态话题，无标题，自动搜图） |
+| `multi_publish_0707.py` | MultiPost 批量发布脚本（模板） |
+| `fix_topic_quotes.py` | 修复脚本中 TOPIC_TAGS 的中文引号 |
 | `start_chrome.py` | Chrome 启动（Mac/Windows 双平台） |
-| `adapter/image_search.py` | Pexels API 搜图 |
-| `config.py` | 间隔配置、API Key |
+| `adapter/image_search.py` | Pexels API 搜图 + 百度图片备用 |
+| `adapter/compliance.py` | 图片合规打码 |
+| `config.py` | 间隔配置、API Key（.env → pydantic Settings） |
+| `db/database.py` | SQLite 存储 |
+
+## 字段限制
+- 脉脉标题：20字
+- 脉脉正文：1000字
