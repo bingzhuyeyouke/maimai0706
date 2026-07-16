@@ -5,18 +5,28 @@
 ## 前置条件
 
 1. **Chrome 必须以调试端口启动**：`python3 start_chrome.py`（Mac/Windows 双平台）
-2. **环境配置**：复制 `.env.example` 为 `.env`，填入 `PEXELS_API_KEY`
-3. **依赖安装**：`pip install -r requirements.txt`
-4. **首次运行务必 `--dry-run`** 测试流程
+2. **MultiPost 扩展必须安装并启用**：Chrome Web Store 搜索「文章同步助手」安装
+3. **环境配置**：复制 `.env.example` 为 `.env`，填入 `PEXELS_API_KEY`
+4. **依赖安装**：`pip install -r requirements.txt`
+5. **首次运行务必 `--dry-run`** 测试流程
+
+## ⚠️ Windows 用户必读
+
+Windows 上 **直接使用默认 Chrome profile**（不复制到临时目录），因此：
+
+- **启动前必须先关闭日常 Chrome**——同一个 profile 不能被两个 Chrome 实例同时占用
+- 脚本会自动检测并关闭已运行的 Chrome，无需手动操作
+- 扩展/登录状态 100% 可用，无需重复安装
+
+关闭方法：右键任务栏 Chrome 图标 → 退出（或 `taskkill /F /IM chrome.exe`）
 
 ## 发帖模式快捷指令
 
-| 指令 | 模式 | 脚本 | 平台 | 依赖扩展 |
-|------|------|------|------|----------|
-| `mutipost` + 文案 | MultiPost三平台发布 | `multi_publish_0715.py` | 脉脉+公众号+头条 | ⚠️需要MultiPost扩展 |
-| `directpost` + 文案 | 直连三平台发布 | `direct_publish_0715.py` | 脉脉+公众号+头条 | ✅零扩展依赖 |
-| `爆料` / `爆个料` | 爆料活动 | `paste_post.py` | 脉脉 | ⚠️需要MultiPost扩展 |
-| `闪电观察` / `话题` | 闪电观察者 | `shandian_post.py` | 脉脉 | ⚠️需要MultiPost扩展 |
+| 指令 | 模式 | 脚本 | 平台 |
+|------|------|------|------|
+| `mutipost` + 文案 | MultiPost三平台发布 | `multi_publish_0715.py` | 脉脉+公众号+头条 |
+| `爆料` / `爆个料` | 爆料活动 | `paste_post.py` | 脉脉 |
+| `闪电观察` / `话题` | 闪电观察者 | `shandian_post.py` | 脉脉 |
 
 ## ⚠️ 发帖决策树（收到发帖任务必读）
 
@@ -60,37 +70,7 @@
 - **命令**：`python3 shandian_post.py --file posts/shandian.txt --no-image`
 - **每话题2篇**，用 `## 话题名称` 分隔
 
-## MultiPost 三平台发布规则（mutipost 指令必读）
-
-> ⚠️ MultiPost 模式需要 Chrome 安装 MultiPost 扩展。如果扩展不可用，使用 `directpost` 指令。
-
-## DirectPublisher 直连三平台发布规则（directpost 指令必读）
-
-> ✅ 零扩展依赖！Playwright 直接操作各平台发布页面。Windows/Mac 开箱即用。
-
-### 与 MultiPost 的区别
-- **不需要 MultiPost 扩展**——Playwright 直接打开各平台编辑器
-- **每平台独立标签页**——打开→操作→关闭，不残留
-- **接口签名兼容**——`publish()` 和 `batch_post()` 与 MultiPostPublisher 一致
-- **Chrome 端口 9334**——避免与 MultiPost 的 9333 冲突
-
-### 直连发布流程
-1. 脉脉：打开 maimai.cn → 清表单 → 填正文 → 上传图片 → 切身份 → 加话题 → 勾开关 → 发动态
-2. 公众号：打开 mp.weixin.qq.com → 新建图文 → 填标题 → 填正文 → 上传图片 → 保存草稿 ⚠️**不点发表**
-3. 头条：打开 mp.toutiao.com → 填标题 → 上传图片 → 填正文 → 追加 #上头条 聊热点# → 发布
-
-### 内容格式理解
-- 与 MultiPost 模式完全一致：title=话题名，body=粗体导语+后续段落
-- 话题名引号规则相同：必须用中文引号
-
-### 发帖间隔
-- `direct_post_interval = 90`（90秒，±30秒抖动）
-
-### 命令
-```bash
-python3 direct_publish_0715.py        # 正式发布
-python3 direct_publish_0715.py --dry-run  # 干跑测试（修改脚本 dry_run=True）
-```
+## MultiPost 三平台发布规则
 
 ### 内容格式理解
 - **title = 话题名**（即"话题N："后面的部分，如 `曝Claude脑子里长出"意识"`）
@@ -146,6 +126,7 @@ python3 direct_publish_0715.py --dry-run  # 干跑测试（修改脚本 dry_run=
 - 使用 `platform.system()` 检测操作系统
 - 路径使用 `pathlib.Path`，不硬编码斜杠
 - Chrome 启动参数适配不同平台（`start_chrome.py` 已处理）
+- Windows 直接用默认 profile，macOS 用临时 profile（cp -r 无视建议锁）
 - 考虑不同屏幕尺寸的兼容性
 
 ## 关键文件
@@ -153,7 +134,6 @@ python3 direct_publish_0715.py --dry-run  # 干跑测试（修改脚本 dry_run=
 | 文件 | 作用 |
 |------|------|
 | `publisher/multipost.py` | MultiPostPublisher 核心，统管所有平台 |
-| `publisher/direct.py` | DirectPublisher 直连三平台（零扩展依赖） |
 | `publisher/maimai.py` | MaimaiPageOps mixin（脉脉DOM操作） |
 | `paste_post.py` | 爆料活动入口（固定话题，有标题，手动配图） |
 | `shandian_post.py` | 闪电观察者入口（动态话题，无标题，自动搜图） |

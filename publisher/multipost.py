@@ -52,7 +52,11 @@ DEFAULT_CDP_URL = "http://localhost:9222"
 # dedicated 模式：脚本自动启停 Chrome，用户无需手动运行 start_chrome.py
 # 使用与 start_chrome.py 相同的 profile 和端口，确保登录状态可用
 DEDICATED_DEBUG_PORT = 9333
-DEDICATED_USER_DATA = os.path.join(os.environ.get("TEMP", ""), "chrome-automation-profile") if IS_WINDOWS else "/tmp/chrome-automation-profile"
+if IS_WINDOWS:
+    # Windows 直接用默认 profile，不复制（避免文件锁导致扩展缺失）
+    DEDICATED_USER_DATA = os.path.expandvars(r"%LocalAppData%\Google\Chrome\User Data")
+else:
+    DEDICATED_USER_DATA = "/tmp/chrome-automation-profile"
 
 # MultiPost 编辑器地址
 MULTIPOST_URL = "https://multipost.app/"
@@ -64,6 +68,7 @@ DEFAULT_PLATFORMS = ["微信公众号", "今日头条"]
 MULTIPOST_EXT_ID = "dhohkaclnjgcikfoaacfgijgjgceofih"
 
 # 今日头条正文末尾要追加的话题（用户要求）
+TOUTIAO_HASHTAG = "#上头条 聊热点#"# 今日头条正文末尾要追加的话题（用户要求）
 TOUTIAO_HASHTAG = "#上头条 聊热点#"
 
 # 跨平台 Chrome 路径
@@ -91,11 +96,73 @@ def _find_chrome() -> str:
     raise FileNotFoundError("未找到 Chrome，请安装 Google Chrome")
 
 
+def _is_chrome_running() -> bool:
+    """检测 Chrome 是否正在运行"""
+    try:
+        if IS_WINDOWS:
+            result = subprocess.run(
+                'tasklist /FI "IMAGENAME eq chrome.exe"',
+                capture_output=True, text=True, timeout=10,
+            )
+            return 'chrome.exe' in result.stdout
+        else:
+            result = subprocess.run(
+                ['pgrep', '-x', 'Google Chrome'],
+                capture_output=True, timeout=5,
+            )
+            return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _validate_multipost_extension(profile_dir: str) -> bool:
+    """验证 MultiPost 扩展文件是否完整存在于 profile 中
+
+    检查关键文件：manifest.json、inject-api.js、service-worker-loader.js
+    """
+    default_dir = Path(profile_dir) / "Default"
+    ext_base = default_dir / "Extensions" / MULTIPOST_EXT_ID
+
+    if not ext_base.exists():
+        logger.warning(f"  ⚠️ MultiPost 扩展目录不存在: {ext_base}")
+        return False
+
+    version_dirs = [d for d in ext_base.iterdir() if d.is_dir()]
+    if not version_dirs:
+        logger.warning(f"  ⚠️ MultiPost 扩展无版本目录: {ext_base}")
+        return False
+
+    version_dir = version_dirs[0]
+    critical_files = ["manifest.json", "inject-api.js", "service-worker-loader.js"]
+    missing = [f for f in critical_files if not (version_dir / f).exists()]
+
+    if missing:
+        logger.warning(f"  ⚠️ MultiPost 扩展文件缺失: {missing}")
+        logger.warning(f"  扩展路径: {version_dir}")
+        return False
+
+    logger.info(f"  ✓ MultiPost 扩展文件完整 (版本: {version_dir.name})")
+    return True
+
+
 def _ensure_profile(profile_dir: str):
-    """确保独立 profile 目录存在（从默认 profile 复制关键文件）"""
+    """确保独立 profile 目录存在
+
+    Windows: 直接使用默认 profile（DEDICATED_USER_DATA 就是默认路径），不复制。
+    macOS: 从默认 profile 复制关键文件到临时目录。
+    """
+    # Windows 直接用默认 profile，无需复制
+    if IS_WINDOWS:
+        if not Path(profile_dir).exists():
+            logger.error(f"  ❌ Chrome 默认 profile 不存在: {profile_dir}")
+            raise RuntimeError("Chrome 默认 profile 不存在，请确认已安装 Chrome")
+        return
+
+    # === macOS 逻辑 ===
     dest = Path(profile_dir)
     if dest.exists():
         return
+
     logger.info(f"  首次使用独立 profile，复制登录状态（约30秒）...")
     dest.mkdir(parents=True, exist_ok=True)
     dest_default = dest / "Default"
@@ -124,17 +191,8 @@ def _ensure_profile(profile_dir: str):
         src_item = src_default / item
         if src_item.exists():
             try:
-                if IS_WINDOWS:
-                    dst_item = dest_default / item
-                    if src_item.is_dir():
-                        if dst_item.exists():
-                            shutil.rmtree(dst_item)
-                        shutil.copytree(str(src_item), str(dst_item))
-                    else:
-                        shutil.copy2(str(src_item), str(dst_item))
-                else:
-                    subprocess.run(["cp", "-r", str(src_item), str(dest_default / item)],
-                                   capture_output=True, timeout=30)
+                subprocess.run(["cp", "-r", str(src_item), str(dest_default / item)],
+                               capture_output=True, timeout=30)
             except Exception:
                 pass
 
@@ -142,19 +200,29 @@ def _ensure_profile(profile_dir: str):
         src_item = src / item
         if src_item.exists():
             try:
-                if IS_WINDOWS:
-                    shutil.copy2(str(src_item), str(dest / item))
-                else:
-                    subprocess.run(["cp", str(src_item), str(dest / item)],
-                                   capture_output=True, timeout=5)
+                subprocess.run(["cp", str(src_item), str(dest / item)],
+                               capture_output=True, timeout=5)
             except Exception:
                 pass
+
     logger.success("  ✓ Profile 复制完成")
 
 
 def _start_dedicated_chrome(port: int, profile_dir: str) -> Optional[subprocess.Popen]:
     """启动独立的 Chrome 实例，返回进程对象"""
     chrome_path = _find_chrome()
+
+    # Windows: 直接用默认 profile，必须先关闭日常 Chrome
+    if IS_WINDOWS and _is_chrome_running():
+        logger.warning("  ⚠️ 检测到 Chrome 正在运行，自动关闭...")
+        try:
+            subprocess.run('taskkill /F /IM chrome.exe', shell=True, capture_output=True, timeout=15)
+        except Exception:
+            pass
+        time.sleep(3)
+        if _is_chrome_running():
+            raise RuntimeError("Chrome 关闭失败，请手动关闭后重试（taskkill /F /IM chrome.exe）")
+
     _ensure_profile(profile_dir)
 
     cmd = [
@@ -665,6 +733,33 @@ class MultiPostPublisher(MaimaiPageOps):
                     raise RuntimeError("Chrome 长时间未响应")
                 found_page.reload(wait_until="domcontentloaded", timeout=10000)
             time.sleep(3)
+
+        # ⚠️ 检测 MultiPost 扩展是否可用（window.$poster 是扩展注入的 API）
+        # 扩展 content script 注入 inject-api.js → 创建 window.$poster / window.$syncer
+        # 如果检测不到，说明扩展未加载（通常是 profile 复制不完整导致）
+        ext_ok = found_page.evaluate('() => typeof window.$poster !== "undefined" || typeof window.$syncer !== "undefined"')
+        if not ext_ok:
+            # 再等2秒，content script 可能还没注入完
+            time.sleep(2)
+            ext_ok = found_page.evaluate('() => typeof window.$poster !== "undefined" || typeof window.$syncer !== "undefined"')
+
+        if ext_ok:
+            logger.success("✓ MultiPost 扩展已检测到（window.$poster 可用）")
+        else:
+            logger.error("=" * 50)
+            logger.error("❌ MultiPost 扩展未检测到！页面无法发布到各平台")
+            logger.error("   原因：Chrome 未加载 MultiPost 扩展（window.$poster 不存在）")
+            logger.error("")
+            logger.error("   修复步骤：")
+            logger.error("   1. 确认已在 Chrome 中安装 MultiPost 扩展（文章同步助手）")
+            logger.error("   2. 完全关闭日常 Chrome（Windows: 右键任务栏→退出）")
+            if not IS_WINDOWS:
+                logger.error("   3. 删除临时 profile：rm -rf /tmp/chrome-automation-profile")
+                logger.error("   4. 重新运行 python3 start_chrome.py")
+            else:
+                logger.error("   3. 重新运行 python start_chrome.py（Windows 直接用默认 profile，无需删除）")
+            logger.error("=" * 50)
+            raise RuntimeError("MultiPost 扩展未检测到，请按上述步骤修复")
 
         logger.success("✓ 编辑器已打开")
         return found_page

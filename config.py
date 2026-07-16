@@ -38,11 +38,6 @@ class Settings(BaseSettings):
         description="MultiPost 发帖间隔基准（秒），±30秒抖动，默认90秒≈1.5分钟",
     )
 
-    # ---------- DirectPublisher 直连发布 ----------
-    direct_post_interval: int = Field(
-        default=90,
-        description="DirectPublisher 发帖间隔基准（秒），±30秒抖动，默认90秒≈1.5分钟",
-    )
 
     # ---------- Pexels 搜图 ----------
     pexels_api_key: str = Field(

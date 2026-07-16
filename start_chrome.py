@@ -11,6 +11,8 @@ Chrome 启动辅助脚本（Mac/Windows 双平台）
   python3 paste_post.py
 
 ⚠️  如果 Chrome 已经在运行，需要先完全退出再运行本脚本
+⚠️  Windows 用户：必须先关闭日常 Chrome！脚本直接使用默认 profile，
+     同一个 profile 不能被两个 Chrome 实例同时占用。
 """
 
 import os
@@ -34,8 +36,10 @@ if IS_WINDOWS:
         os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
         os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
     ]
-    CHROME_USER_DATA = os.path.join(os.environ.get("TEMP", ""), "chrome-automation-profile")
-    CHROME_DEFAULT_PROFILE = os.path.expandvars(
+    # ⚠️ Windows 直接使用默认 profile，不复制！
+    # 原因：Windows 强制文件锁，复制 profile 时如果 Chrome 在运行会导致扩展文件缺失
+    # 直接用默认 profile = 扩展/登录状态 100% 可用，零复制风险
+    CHROME_USER_DATA = os.path.expandvars(
         r"%LocalAppData%\Google\Chrome\User Data"
     )
 else:
@@ -43,11 +47,15 @@ else:
     CHROME_PATHS = [
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     ]
+    # macOS 用临时 profile（cp -r 无视建议锁，复制可靠）
     CHROME_USER_DATA = "/tmp/chrome-automation-profile"
     CHROME_DEFAULT_PROFILE = str(Path.home() / "Library/Application Support/Google/Chrome")
 
 # 远程调试端口
 DEBUG_PORT = 9222
+
+# MultiPost 扩展 ID（用于复制后验证）
+MULTIPOST_EXT_ID = "dhohkaclnjgcikfoaacfgijgjgceofih"
 
 
 def find_chrome() -> str:
@@ -61,9 +69,110 @@ def find_chrome() -> str:
     )
 
 
-def copy_profile_if_needed():
-    """如果临时 profile 不存在，从默认 profile 复制"""
+def _is_chrome_running() -> bool:
+    """检测 Chrome 是否正在运行"""
+    try:
+        if IS_WINDOWS:
+            result = subprocess.run(
+                'tasklist /FI "IMAGENAME eq chrome.exe"',
+                capture_output=True, text=True, timeout=10,
+            )
+            return 'chrome.exe' in result.stdout
+        else:
+            result = subprocess.run(
+                ['pgrep', '-x', 'Google Chrome'],
+                capture_output=True, timeout=5,
+            )
+            return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _kill_chrome():
+    """强制关闭 Chrome 进程"""
+    try:
+        if IS_WINDOWS:
+            subprocess.run('taskkill /F /IM chrome.exe', shell=True, capture_output=True, timeout=15)
+        else:
+            subprocess.run(['pkill', '-x', 'Google Chrome'], capture_output=True, timeout=10)
+        time.sleep(3)
+        logger.success("✓ Chrome 已关闭")
+    except Exception as e:
+        logger.warning(f"关闭 Chrome 失败: {e}")
+
+
+def _validate_multipost_extension(profile_dir: str) -> bool:
+    """验证 MultiPost 扩展文件是否完整存在于 profile 中
+
+    检查关键文件：
+      - manifest.json（扩展注册入口）
+      - inject-api.js（网页检测扩展的核心文件）
+      - service-worker-loader.js（Manifest V3 后台脚本）
+    """
+    default_dir = Path(profile_dir) / "Default"
+    ext_base = default_dir / "Extensions" / MULTIPOST_EXT_ID
+
+    if not ext_base.exists():
+        logger.warning(f"  ⚠️ MultiPost 扩展目录不存在: {ext_base}")
+        return False
+
+    # 找到版本子目录（如 2.0.9_0）
+    version_dirs = [d for d in ext_base.iterdir() if d.is_dir()]
+    if not version_dirs:
+        logger.warning(f"  ⚠️ MultiPost 扩展无版本目录: {ext_base}")
+        return False
+
+    version_dir = version_dirs[0]
+    critical_files = [
+        "manifest.json",
+        "inject-api.js",
+        "service-worker-loader.js",
+    ]
+
+    missing = []
+    for fname in critical_files:
+        if not (version_dir / fname).exists():
+            missing.append(fname)
+
+    if missing:
+        logger.warning(f"  ⚠️ MultiPost 扩展文件缺失: {missing}")
+        logger.warning(f"  扩展路径: {version_dir}")
+        return False
+
+    logger.info(f"  ✓ MultiPost 扩展文件完整 (版本目录: {version_dir.name})")
+    return True
+
+
+def copy_profile_if_needed(force: bool = False):
+    """如果临时 profile 不存在，从默认 profile 复制
+
+    ⚠️ Windows 不复制！直接使用默认 profile（CHROME_USER_DATA 就是默认路径）。
+    只有 macOS 走复制逻辑（macOS 建议锁，cp -r 不受影响）。
+
+    参数:
+        force: 强制重新复制（删除旧 profile 再复制）
+    """
+    # Windows 直接用默认 profile，不需要复制
+    if IS_WINDOWS:
+        if not Path(CHROME_USER_DATA).exists():
+            logger.error(f"❌ Chrome 默认 profile 不存在: {CHROME_USER_DATA}")
+            logger.error("   请确认已安装 Google Chrome 并至少启动过一次")
+            sys.exit(1)
+        logger.info(f"Windows: 直接使用默认 profile（无需复制）")
+        return
+
+    # === 以下为 macOS 逻辑 ===
     dest = Path(CHROME_USER_DATA)
+
+    # 强制重新复制
+    if force and dest.exists():
+        logger.info("强制重新复制 profile（删除旧 profile）...")
+        try:
+            shutil.rmtree(dest)
+        except Exception as e:
+            logger.error(f"❌ 无法删除旧 profile: {e}")
+            sys.exit(1)
+
     if dest.exists():
         logger.info(f"临时 profile 已存在: {dest}")
         return
@@ -98,19 +207,8 @@ def copy_profile_if_needed():
         src_item = src_default / item
         if src_item.exists():
             try:
-                if IS_WINDOWS:
-                    # Windows 用 shutil.copytree/copy2
-                    dst_item = dest_default / item
-                    if src_item.is_dir():
-                        if dst_item.exists():
-                            shutil.rmtree(dst_item)
-                        shutil.copytree(str(src_item), str(dst_item))
-                    else:
-                        shutil.copy2(str(src_item), str(dst_item))
-                else:
-                    # macOS 用 cp -r（更快）
-                    subprocess.run(["cp", "-r", str(src_item), str(dest_default / item)],
-                                   capture_output=True, timeout=30)
+                subprocess.run(["cp", "-r", str(src_item), str(dest_default / item)],
+                               capture_output=True, timeout=30)
                 logger.debug(f"  ✓ {item}")
             except Exception as e:
                 logger.warning(f"  ✗ {item}: {e}")
@@ -120,11 +218,8 @@ def copy_profile_if_needed():
         src_item = src / item
         if src_item.exists():
             try:
-                if IS_WINDOWS:
-                    shutil.copy2(str(src_item), str(dest / item))
-                else:
-                    subprocess.run(["cp", str(src_item), str(dest / item)],
-                                   capture_output=True, timeout=5)
+                subprocess.run(["cp", str(src_item), str(dest / item)],
+                               capture_output=True, timeout=5)
             except Exception:
                 pass
 
@@ -145,6 +240,19 @@ def check_port_available() -> bool:
 def start_chrome():
     """启动带调试端口的 Chrome"""
     chrome_path = find_chrome()
+
+    # Windows: 直接用默认 profile，必须先关闭日常 Chrome
+    if IS_WINDOWS and _is_chrome_running():
+        logger.warning("⚠️ 检测到 Chrome 正在运行")
+        logger.warning("   Windows 直接使用默认 profile，必须先关闭日常 Chrome")
+        logger.warning("   正在自动关闭 Chrome...")
+        _kill_chrome()
+        if _is_chrome_running():
+            logger.error("❌ Chrome 关闭失败，请手动关闭后重试")
+            logger.error("   方法：右键任务栏 Chrome 图标 → 退出")
+            logger.error("   或运行：taskkill /F /IM chrome.exe")
+            sys.exit(1)
+
     copy_profile_if_needed()
 
     if not check_port_available():
