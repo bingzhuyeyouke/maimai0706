@@ -89,13 +89,22 @@ def _is_chrome_running() -> bool:
 
 
 def _kill_chrome():
-    """强制关闭 Chrome 进程"""
+    """强制关闭 Chrome 进程，等待文件锁释放"""
     try:
         if IS_WINDOWS:
             subprocess.run('taskkill /F /IM chrome.exe', shell=True, capture_output=True, timeout=15)
+            # Windows 强制锁：Chrome 进程杀掉后文件锁不会立即释放
+            # 需要等待更久确保 SQLite/Extensions 锁全部释放
+            logger.info("  等待 Windows 文件锁释放...")
+            time.sleep(8)
+            # 二次确认：可能还有残留子进程
+            if _is_chrome_running():
+                logger.warning("  检测到残留 Chrome 进程，再次关闭...")
+                subprocess.run('taskkill /F /IM chrome.exe', shell=True, capture_output=True, timeout=15)
+                time.sleep(5)
         else:
             subprocess.run(['pkill', '-x', 'Google Chrome'], capture_output=True, timeout=10)
-        time.sleep(3)
+            time.sleep(3)
         logger.success("✓ Chrome 已关闭")
     except Exception as e:
         logger.warning(f"关闭 Chrome 失败: {e}")
